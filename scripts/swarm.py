@@ -1,11 +1,9 @@
 #!/usr/bin/env python3
-"""Kaggle submission pipeline for ARC Prize 2026 (ARC-AGI-3).
-
-Generates a submission by running our agent against all competition games
-and formatting results for Kaggle upload.
+"""Multi-game swarm runner — runs an agent across many games concurrently.
 
 Usage:
-    python kaggle/submit.py --agent=dfs --output=kaggle/submission/results.json
+    python scripts/swarm.py --agent=dfs --games ls20 ft09 --workers=4
+    python scripts/swarm.py --agent=astar --all --output=results/swarm.json
 """
 
 from __future__ import annotations
@@ -14,39 +12,26 @@ import argparse
 import json
 import sys
 import time
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from pathlib import Path
 
-# Add project root to path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 
-def get_competition_games() -> list[str]:
-    """Retrieve the list of competition game IDs.
-
-    In the real competition, this will come from the Kaggle dataset
-    or the ARC-AGI API. For now, returns a placeholder list.
-    """
-    try:
-        from arc_agi import Arcade
-
-        arc = Arcade()
-        # The SDK should provide a way to list competition games
-        games = arc.list_games() if hasattr(arc, "list_games") else []
-        if games:
-            return [g.id if hasattr(g, "id") else str(g) for g in games]
-    except ImportError:
-        pass
-
-    # Placeholder — replace with actual competition game IDs
-    return []
-
-
-def run_agent_on_game(agent, game_id: str, max_steps: int = 1000) -> dict:
-    """Run an agent on a single game and return the result."""
+def run_single_game(agent_name: str, game_id: str, max_steps: int, max_depth: int) -> dict:
+    """Run a single agent-game pair. Designed for process pool execution."""
+    from agents import AVAILABLE_AGENTS
     from agents.structs import FrameData, GameAction, GameState
 
+    agent_cls = AVAILABLE_AGENTS[agent_name]
+    if agent_name in ("dfs", "astar"):
+        agent = agent_cls(max_depth=max_depth, max_steps=max_steps)
+    elif agent_name == "bfs":
+        agent = agent_cls(max_depth=max_depth, max_steps=max_steps)
+    else:
+        agent = agent_cls(max_steps=max_steps)
+
     agent.reset()
-    frames: list[FrameData] = [FrameData(frame_number=0)]
     start = time.time()
 
     try:
@@ -67,7 +52,9 @@ def run_agent_on_game(agent, game_id: str, max_steps: int = 1000) -> dict:
             GameAction.ACTION7: SDKGameAction.ACTION7,
         }
 
+        frames: list[FrameData] = [FrameData(frame_number=0)]
         step = 0
+
         while not agent.is_done(frames, frames[-1]):
             action = agent.choose_action(frames, frames[-1])
             sdk_action = sdk_map[action.action]
@@ -88,29 +75,29 @@ def run_agent_on_game(agent, game_id: str, max_steps: int = 1000) -> dict:
             )
             frames.append(frame)
 
-        scorecard = arc.get_scorecard()
         elapsed = time.time() - start
-
         return {
             "game_id": game_id,
+            "agent": agent_name,
             "status": "completed",
             "steps": step,
             "elapsed_seconds": round(elapsed, 2),
             "final_state": frames[-1].state.value,
             "levels_completed": frames[-1].levels_completed,
             "win_levels": frames[-1].win_levels,
-            "scorecard": scorecard if isinstance(scorecard, dict) else str(scorecard),
         }
 
     except ImportError:
         return {
             "game_id": game_id,
-            "status": "skipped",
-            "reason": "arc-agi SDK not installed",
+            "agent": agent_name,
+            "status": "no_sdk",
+            "elapsed_seconds": round(time.time() - start, 2),
         }
     except Exception as e:
         return {
             "game_id": game_id,
+            "agent": agent_name,
             "status": "error",
             "error": str(e),
             "elapsed_seconds": round(time.time() - start, 2),
@@ -118,58 +105,66 @@ def run_agent_on_game(agent, game_id: str, max_steps: int = 1000) -> dict:
 
 
 def main():
-    parser = argparse.ArgumentParser(description="ARC-AGI-3 Kaggle Submission Generator")
+    parser = argparse.ArgumentParser(description="Multi-game swarm runner")
     parser.add_argument("--agent", default="dfs", choices=["random", "dfs", "bfs", "astar"])
+    parser.add_argument("--games", nargs="*", help="Game IDs to run")
+    parser.add_argument("--all", action="store_true", help="Run all available games")
+    parser.add_argument("--workers", type=int, default=4, help="Parallel workers")
     parser.add_argument("--max-steps", type=int, default=1000)
     parser.add_argument("--max-depth", type=int, default=50)
-    parser.add_argument("--output", default="kaggle/submission/results.json")
-    parser.add_argument("--games", nargs="*", help="Specific game IDs to run (default: all)")
+    parser.add_argument("--output", default="results/swarm.json")
     args = parser.parse_args()
 
-    from agents import AVAILABLE_AGENTS
+    games = args.games or []
 
-    agent_cls = AVAILABLE_AGENTS[args.agent]
-    if args.agent in ("dfs", "astar"):
-        agent = agent_cls(max_depth=args.max_depth, max_steps=args.max_steps)
-    elif args.agent == "bfs":
-        agent = agent_cls(max_depth=args.max_depth, max_steps=args.max_steps)
-    else:
-        agent = agent_cls(max_steps=args.max_steps)
+    if args.all or not games:
+        try:
+            from arc_agi import Arcade
 
-    games = args.games or get_competition_games()
+            arc = Arcade()
+            game_list = arc.list_games() if hasattr(arc, "list_games") else []
+            games = [g.id if hasattr(g, "id") else str(g) for g in game_list]
+        except ImportError:
+            pass
 
     if not games:
-        print("No games found. Provide game IDs via --games or install arc-agi SDK.")
-        print("Example: python kaggle/submit.py --agent=dfs --games ls20 ft09")
+        print("No games specified. Use --games or --all with arc-agi SDK installed.")
         sys.exit(1)
 
-    print(f"Running {agent.name} on {len(games)} games...")
+    print(f"Swarm: {args.agent} agent x {len(games)} games ({args.workers} workers)")
     results = []
+    start = time.time()
 
-    for i, game_id in enumerate(games, 1):
-        print(f"  [{i}/{len(games)}] {game_id}...", end=" ", flush=True)
-        result = run_agent_on_game(agent, game_id, args.max_steps)
-        results.append(result)
-        status = result.get("final_state", result.get("status", "unknown"))
-        print(f"{status} ({result.get('steps', 0)} steps)")
+    with ProcessPoolExecutor(max_workers=args.workers) as pool:
+        futures = {
+            pool.submit(run_single_game, args.agent, gid, args.max_steps, args.max_depth): gid
+            for gid in games
+        }
+        for future in as_completed(futures):
+            gid = futures[future]
+            try:
+                result = future.result()
+                results.append(result)
+                state = result.get("final_state", result.get("status"))
+                steps = result.get("steps", "?")
+                print(f"  {gid}: {state} ({steps} steps)")
+            except Exception as e:
+                print(f"  {gid}: FAILED ({e})")
+                results.append({"game_id": gid, "status": "crash", "error": str(e)})
 
-    # Summary
+    total_time = round(time.time() - start, 2)
     wins = sum(1 for r in results if r.get("final_state") == "win")
-    errors = sum(1 for r in results if r.get("status") == "error")
-    print(f"\nResults: {wins}/{len(results)} wins, {errors} errors")
+    print(f"\nDone in {total_time}s: {wins}/{len(results)} wins")
 
-    # Save
     output_path = Path(args.output)
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    submission = {
-        "agent": agent.name,
-        "timestamp": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+    output_path.write_text(json.dumps({
+        "agent": args.agent,
         "total_games": len(results),
         "wins": wins,
-        "errors": errors,
+        "total_seconds": total_time,
         "results": results,
-    }
-    output_path.write_text(json.dumps(submission, indent=2))
+    }, indent=2))
     print(f"Saved to {args.output}")
 
 

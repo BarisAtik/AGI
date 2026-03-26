@@ -3,7 +3,8 @@
 
 Usage:
     uv run main.py --agent=dfs --game=ls20
-    uv run main.py --agent=random --game=ft09 --render
+    uv run main.py --agent=astar --game=ft09 --render
+    uv run main.py --agent=bfs --game=ls20 --max-depth=20
     uv run main.py --agent=dfs --game=ls20 --max-depth=30 --max-steps=500
 """
 
@@ -26,7 +27,7 @@ def parse_args() -> argparse.Namespace:
         "--agent",
         type=str,
         default="dfs",
-        choices=["random", "dfs"],
+        choices=["random", "dfs", "bfs", "astar"],
         help="Agent to use (default: dfs)",
     )
     parser.add_argument(
@@ -65,7 +66,9 @@ def create_agent(args: argparse.Namespace):
     from agents import AVAILABLE_AGENTS
 
     agent_cls = AVAILABLE_AGENTS[args.agent]
-    if args.agent == "dfs":
+    if args.agent in ("dfs", "astar"):
+        return agent_cls(max_depth=args.max_depth, max_steps=args.max_steps)
+    elif args.agent == "bfs":
         return agent_cls(max_depth=args.max_depth, max_steps=args.max_steps)
     elif args.agent == "random":
         return agent_cls(max_steps=args.max_steps)
