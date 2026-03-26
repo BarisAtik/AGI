@@ -1,0 +1,45 @@
+# Nightshift configuration for ARC-AGI-3 solver
+# Runs overnight to improve the solver iteratively
+#
+# Install: brew install marcus/tap/nightshift
+# Setup:   nightshift setup
+# Preview: nightshift preview
+# Run:     nightshift run
+
+schedule:
+  cron: "0 2 * * *"  # Run at 2 AM daily
+
+budget:
+  mode: daily
+  max_percent: 75
+  reserve_percent: 5
+  billing_mode: subscription
+  calibrate_enabled: true
+  snapshot_interval: 30m
+
+providers:
+  preference:
+    - claude
+
+projects:
+  - path: .
+    name: arc-agi-3-solver
+
+tasks:
+  enabled:
+    - bug-finder         # Find bugs in agent logic
+    - lint-fix           # Auto-fix linting issues
+    - test-gap           # Identify missing tests
+    - docs-backfill      # Keep docs in sync
+    - skill-groom        # Update .claude/skills
+    - dead-code          # Remove unused code
+    - security-scan      # Check for vulnerabilities
+
+  intervals:
+    bug-finder: "24h"
+    lint-fix: "24h"
+    test-gap: "48h"
+    docs-backfill: "168h"
+    skill-groom: "168h"
+    dead-code: "72h"
+    security-scan: "168h"
